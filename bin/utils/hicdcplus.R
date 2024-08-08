@@ -8,6 +8,10 @@ library(optparse)
 # That the Y chromosome causes an error in HiCDCPlus, and neither chrX nor chrY were included in GraphReg
 # Currently this script only does intrachromosomal interactions
 # There were MORE significant interactions when using a mappability file, not fewer.
+# The key choices I had to make were: 
+# - using mappability
+# - using RE-based features
+
 
 options(error=traceback)
 option_list <- list(
@@ -35,7 +39,7 @@ re_cutsites <- strsplit(options$re_cutsite, ",")[[1]]
 if(!is.null(options$chrs)) {
     chrs <- strsplit(options$chrs, ",")[[1]]
 } else {
-    chrs <- paste0("chr", c(1:21, "X"))
+    chrs <- paste0("chr", c(1:22, "X"))
 }
 bintolen_path <- options$bintolen
 use_existing <- options$use_existing
