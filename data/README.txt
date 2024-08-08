@@ -30,16 +30,6 @@ cd ..
 
 
 
-# GENCODE annotations
-
-mkdir -p gencode && cd gencode
-wget https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_46/gencode.v46.annotation.gtf.gz
-gunzip gencode.v46.annotation.gtf.gz
-awk '{if ($3 == "transcript") {print $0}}' gencode.v46.annotation.gtf > gencode.v46.annotation_transcripts.gtf
-awk '{if ($3 == "gene") {print $0}}' gencode.v46.annotation.gtf > gencode.v46.annotation_genes.gtf
-cd ../..
-
-
 
 
 # ENCODE data
@@ -103,7 +93,7 @@ ln -s /pollard/data/vertebrate_genomes/human/hg38/hg38/hg38.fa.fai references/hg
 cd ../data/ncbi_geo/hic
 cd k562
 Rscript --no-save ~/hierarchical/bin/utils/hicdcplus.R --map_bw ~/hierarchical/data/genome_annotations/unmappable_regions/k24.Umap.MultiTrackMappability.bw GSE63525_K562_combined_30.hic GSE63525_K562_combined_result.txt
-
+cd ../../..
 
 
 mkdir -p graphreg_data/1d/k562 
@@ -116,11 +106,27 @@ mkdir -p graphreg_data/preds/k562
 
 # Create graphs
 cd ~/hierarchical
-python bin/utils/create_graphs.py -d data/graphreg_data/3d/k562 data/ncbi_geo/hic/k562/GSE63525_K562_chr1_result.txt data/graphreg_data/seqs/genome_bins.bed
+python bin/utils/create_graphs.py -v -d data/graphreg_data/3d/k562 data/ncbi_geo/hic/k562/GSE63525_K562_combined_result.txt data/graphreg_data/seqs/genome_bins.bed
+
+
+# Get TSSs
+
+mkdir -p ~/hierarchical/data/genome_annotations/gencode && cd ~/hierarchical/data/genome_annotations/gencode
+wget https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_46/gencode.v46.annotation.gtf.gz
+gunzip gencode.v46.annotation.gtf.gz
+awk '{if ($3 == "transcript") {print $0}}' gencode.v46.annotation.gtf > gencode.v46.annotation_transcripts.gtf
+awk '{if ($3 == "gene") {print $0}}' gencode.v46.annotation.gtf > gencode.v46.annotation_genes.gtf
+
+
+# Process TSSs
+cd ~/hierarchical/data/graphreg_data/tss
+# only proetin coding genes for now
+python ~/hierarchical/bin/utils/tss.py --protein ../../genome_annotations/gencode/gencode.v46.annotation.gtf ../seqs/genome_bins.bed
 
 
 
 
-
-
-
+# write TFRecords
+cd ~/hierarchical/data/graphreg_data/tfr
+# no unmap for now
+python ~/hierarchical/bin/utils/graphreg_data_write.py /pollard/data/vertebrate_genomes/human/hg38/hg38/hg38.fa ../../seqs/windows_6Mb_no_gaps.bed ../../1d/k562 ../../3d/k562 ../../tss
