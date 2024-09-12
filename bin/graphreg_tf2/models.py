@@ -1,5 +1,6 @@
 import tensorflow as tf
 from tensorflow.keras.layers import (
+    Input,
     Layer,
     Dropout,
     Conv1D,
@@ -15,9 +16,25 @@ from tensorflow.keras import (
     constraints,
     initializers,
     regularizers,
+    losses,
 )
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras import backend as K
+
+
+def pearsonr(x, y):
+
+    x_bar = tf.reduce_mean(x, axis=-1, keepdims=True)
+    y_bar = tf.reduce_mean(x, axis=-1, keepdims=True)
+
+    cov_x_y = tf.reduce_sum((x - x_bar) * (y - y_bar), axis=-1)
+
+    sd_x = tf.sqrt(tf.reduce_sum(tf.square((x - x_bar)), axis=-1))
+    sd_y = tf.sqrt(tf.reduce_sum(tf.square((y - y_bar)), axis=-1))
+
+    pearson = cov_x_y / (sd_x * sd_y)
+
+    return pearson
 
 
 def poisson_loss(y_true, mu_pred, eps=1e-20):
@@ -33,39 +50,54 @@ def poisson_loss(y_true, mu_pred, eps=1e-20):
     return nll
 
 
+# poisson_loss = losses.Poisson()
+
+
 class SeqCNN(Model):
     def __init__(self, dropout=0.5, l2_reg=0.0):
         super().__init__()
         self.l2_reg = l2_reg
         self.dropout = Dropout(dropout)
         self.conv_tower = Sequential(
-            [
-                self.ConvBlock(256, 21),
+            [  # (B x 100,000 x 4)
+                self.ConvBlock(256, 21),  # (B x 100,000 x 256)
                 BatchNormalization(),
-                MaxPool1D(2),
+                MaxPool1D(2),  # (B x 50,000 x 256)
                 self.dropout,
                 self.ConvBlock(128, 3),
                 BatchNormalization(),
-                MaxPool1D(2),
+                MaxPool1D(2),  # (B x 25,000 x 128)
                 self.dropout,
                 self.ConvBlock(128, 3),
                 BatchNormalization(),
-                MaxPool1D(5),
+                MaxPool1D(5),  # (B x 5,000 x 128)
                 self.dropout,
                 self.ConvBlock(128, 3),
                 BatchNormalization(),
-                MaxPool1D(5),
+                MaxPool1D(5),  # (B x 1,000 x 128)
                 self.dropout,
-                self.ConvBlock(64, 3),
+                self.ConvBlock(64, 3),  # (B x 1,000 x 64)
                 BatchNormalization(),
             ]
         )
-        self.dilatedconv1 = self.DilatedConvBlock(64, 3, 2**1)
-        self.dilatedconv2 = self.DilatedConvBlock(64, 3, 2**2)
-        self.dilatedconv3 = self.DilatedConvBlock(64, 3, 2**3)
-        self.dilatedconv4 = self.DilatedConvBlock(64, 3, 2**4)
-        self.dilatedconv5 = self.DilatedConvBlock(64, 3, 2**5)
-        self.dilatedconv6 = self.DilatedConvBlock(64, 3, 2**6)
+        self.dilatedconv1 = self.DilatedConvBlock(
+            64, 3, 2**1
+        )  # (B x 1,000 x 64), receptive field = 2*3
+        self.dilatedconv2 = self.DilatedConvBlock(
+            64, 3, 2**2
+        )  # (B x 1,000 x 64), receptive field = 4*3
+        self.dilatedconv3 = self.DilatedConvBlock(
+            64, 3, 2**3
+        )  # (B x 1,000 x 64), receptive field = 8*3
+        self.dilatedconv4 = self.DilatedConvBlock(
+            64, 3, 2**4
+        )  # (B x 1,000 x 64), receptive field = 16*3
+        self.dilatedconv5 = self.DilatedConvBlock(
+            64, 3, 2**5
+        )  # (B x 1,000 x 64), receptive field = 32*3
+        self.dilatedconv6 = self.DilatedConvBlock(
+            64, 3, 2**6
+        )  # (B x 1,000 x 64), receptive field = 64*3=196
 
         self.bn1 = BatchNormalization()
         self.bn2 = BatchNormalization()
@@ -74,16 +106,32 @@ class SeqCNN(Model):
         self.bn5 = BatchNormalization()
         self.bn6 = BatchNormalization()
 
-        self.conv_h3k4me3 = Sequential(
-            [Conv1D(1, 5, activation="exponential", padding="same"), Reshape([1000])]
+        self.conv_h3k4me3 = Conv1D(
+            1,
+            5,
+            activation="exponential",
+            padding="same",
+            kernel_initializer=initializers.HeNormal(),
         )
-        self.conv_h3k27ac = Sequential(
-            [Conv1D(1, 5, activation="exponential", padding="same"), Reshape([1000])]
+        self.reshape1 = Reshape([1000])
+
+        self.conv_h3k27ac = Conv1D(
+            1,
+            5,
+            activation="exponential",
+            padding="same",
+            kernel_initializer=initializers.HeNormal(),
         )
-        self.conv_dnase = Sequential(
-            [Conv1D(1, 5, activation="exponential", padding="same"), Reshape([1000])]
+        self.reshape2 = Reshape([1000])
+
+        self.conv_dnase = Conv1D(
+            1,
+            5,
+            activation="exponential",
+            padding="same",
+            kernel_initializer=initializers.HeNormal(),
         )
-        self.reshape = Reshape([1000])
+        self.reshape3 = Reshape([1000])
 
     def ConvBlock(self, filters, kernel_width):
         return Conv1D(
@@ -91,6 +139,7 @@ class SeqCNN(Model):
             kernel_width,
             activation="relu",
             padding="same",
+            kernel_initializer=initializers.HeNormal(),
             kernel_regularizer=l2(self.l2_reg),
             bias_regularizer=l2(self.l2_reg),
         )
@@ -102,14 +151,21 @@ class SeqCNN(Model):
             activation="relu",
             dilation_rate=dilation_rate,
             padding="same",
+            kernel_initializer=initializers.HeNormal(),
             kernel_regularizer=l2(self.l2_reg),
             bias_regularizer=l2(self.l2_reg),
         )
 
     def call(self, x):
+        # if tf.math.reduce_any(tf.math.is_nan(x)):
+        #    print("NaN detected in input!")
+        #    quit()
 
         # Apply convolutions
         x = self.conv_tower(x)
+        # if tf.math.reduce_any(tf.math.is_nan(x)):
+        #    print("NaN detected in conv_tower!")
+        #    quit()
 
         # Save bottleneck representations
         h = x
@@ -141,8 +197,22 @@ class SeqCNN(Model):
 
         # Apply separate head for each assay
         mu_h3k4me3 = self.conv_h3k4me3(x)
+        mu_h3k4me3 = self.reshape1(mu_h3k4me3)
+
+        if tf.math.reduce_any(tf.math.is_nan(mu_h3k4me3)):
+            print("NaN detected in conv_h3k4me3!")
+
         mu_h3k27ac = self.conv_h3k27ac(x)
+        mu_h3k27ac = self.reshape2(mu_h3k27ac)
+
+        if tf.math.reduce_any(tf.math.is_nan(mu_h3k27ac)):
+            print("NaN detected in conv_h3k27ac!")
+
         mu_dnase = self.conv_dnase(x)
+        mu_dnase = self.reshape3(mu_dnase)
+
+        if tf.math.reduce_any(tf.math.is_nan(mu_dnase)):
+            print("NaN detected in conv_dnase!")
 
         return mu_h3k4me3, mu_h3k27ac, mu_dnase, h
 
@@ -239,9 +309,9 @@ class GraphAttention(Layer):
         dropout_rate=0.0,
         activation="relu",
         use_bias=False,
-        kernel_initializer="glorot_uniform",
+        kernel_initializer=initializers.GlorotUniform(seed=62),
         bias_initializer="zeros",
-        attn_kernel_initializer="glorot_uniform",
+        attn_kernel_initializer=initializers.GlorotUniform(seed=62),
         kernel_regularizer=None,
         bias_regularizer=None,
         attn_kernel_regularizer=None,
@@ -261,9 +331,9 @@ class GraphAttention(Layer):
         self.activation = activations.get(activation)
         self.use_bias = use_bias
 
-        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_initializer = kernel_initializer
         self.bias_initializer = initializers.get(bias_initializer)
-        self.attn_kernel_initializer = initializers.get(attn_kernel_initializer)
+        self.attn_kernel_initializer = attn_kernel_initializer
 
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
@@ -457,3 +527,178 @@ class GraphAttention(Layer):
             }
         )
         return config
+
+
+def seq_cnn_base(dropout_rate=0.5, l2_reg=0.0, F=4):
+    X_in = Input(shape=(100000, F))
+    x = Conv1D(
+        256,
+        21,
+        activation="relu",
+        padding="same",
+        kernel_regularizer=l2(l2_reg),
+        bias_regularizer=l2(l2_reg),
+    )(X_in)
+    x = BatchNormalization()(x)
+    x = MaxPool1D(2)(x)
+    x = Dropout(dropout_rate)(x)
+    x = Conv1D(
+        128,
+        3,
+        activation="relu",
+        padding="same",
+        kernel_regularizer=l2(l2_reg),
+        bias_regularizer=l2(l2_reg),
+    )(x)
+    x = BatchNormalization()(x)
+    x = MaxPool1D(2)(x)
+    x = Dropout(dropout_rate)(x)
+    x = Conv1D(
+        128,
+        3,
+        activation="relu",
+        padding="same",
+        kernel_regularizer=l2(l2_reg),
+        bias_regularizer=l2(l2_reg),
+    )(x)
+    x = BatchNormalization()(x)
+    x = MaxPool1D(5)(x)
+    x = Dropout(dropout_rate)(x)
+    x = Conv1D(
+        128,
+        3,
+        activation="relu",
+        padding="same",
+        kernel_regularizer=l2(l2_reg),
+        bias_regularizer=l2(l2_reg),
+    )(x)
+    x = BatchNormalization()(x)
+    x = MaxPool1D(5)(x)
+    x = Dropout(dropout_rate)(x)
+    x = Conv1D(
+        64,
+        3,
+        activation="relu",
+        padding="same",
+        kernel_regularizer=l2(l2_reg),
+        bias_regularizer=l2(l2_reg),
+    )(x)
+    h = BatchNormalization()(x)
+    x = h
+    for i in range(1, 1 + 6):
+        x = Dropout(dropout_rate)(x)
+        x = (
+            Conv1D(
+                64,
+                3,
+                activation="relu",
+                dilation_rate=2**i,
+                padding="same",
+                kernel_regularizer=l2(l2_reg),
+                bias_regularizer=l2(l2_reg),
+            )(x)
+            + x
+        )
+        x = BatchNormalization()(x)
+    mu_h3k4me3 = Conv1D(1, 5, activation="exponential", padding="same")(x)
+    mu_h3k4me3 = Reshape([1000])(mu_h3k4me3)
+    mu_h3k27ac = Conv1D(1, 5, activation="exponential", padding="same")(x)
+    mu_h3k27ac = Reshape([1000])(mu_h3k27ac)
+    mu_dnase = Conv1D(1, 5, activation="exponential", padding="same")(x)
+    mu_dnase = Reshape([1000])(mu_dnase)
+    # Build model
+    model_cnn_base = Model(inputs=X_in, outputs=[mu_h3k4me3, mu_h3k27ac, mu_dnase, h])
+    model_cnn_base._name = "Seq-CNN_base"
+    return model_cnn_base
+
+
+def seq_graphreg():
+    # Parameters
+    T = 400
+    b = 50
+    N = 3 * T  # number of 5Kb bins inside 6Mb region
+    F = 4  # feature dimension
+    F_ = 32  # output size of GraphAttention layer
+    n_attn_heads = 4  # number of attention heads in GAT layers
+    dropout_rate = 0.5  # dropout rate
+    l2_reg = 0.0  # factor for l2 regularization
+    re_load = False
+
+    X_in = Input(shape=(60000, 64))  # dimension of "h" embedding
+    A_in = Input(shape=(N, N))
+
+    x = Conv1D(
+        128,
+        3,
+        activation="relu",
+        padding="same",
+        kernel_regularizer=l2(l2_reg),
+        bias_regularizer=l2(l2_reg),
+    )(X_in)
+    x = BatchNormalization()(x)  # (B, 60000, 128)
+    x = MaxPool1D(2)(x)  # (B, 30000, 128)
+
+    x = Dropout(dropout_rate)(x)
+    x = Conv1D(
+        128,
+        3,
+        activation="relu",
+        padding="same",
+        kernel_regularizer=l2(l2_reg),
+        bias_regularizer=l2(l2_reg),
+    )(x)
+    x = BatchNormalization()(x)  # (B, 30000, 128)
+    x = MaxPool1D(5)(x)  # (B, 6000, 128)
+
+    x = Dropout(dropout_rate)(x)
+    x = Conv1D(
+        128,
+        3,
+        activation="relu",
+        padding="same",
+        kernel_regularizer=l2(l2_reg),
+        bias_regularizer=l2(l2_reg),
+    )(x)
+    x = BatchNormalization()(x)  # (B, 6000, 128)
+    x = MaxPool1D(5)(x)  # (B, 1200, 128)
+
+    att = []
+    for i in range(options.n_gat_layers):
+        x, att_ = GraphAttention(
+            F_,
+            attn_heads=n_attn_heads,
+            attn_heads_reduction="concat",
+            dropout_rate=dropout_rate,
+            activation="elu",
+            kernel_regularizer=l2(l2_reg),
+            attn_kernel_regularizer=l2(l2_reg),
+        )([x, A_in])
+        x = BatchNormalization()(x)
+        att.append(att_)
+
+    x = Dropout(dropout_rate)(x)
+    x = Conv1D(
+        64,
+        1,
+        activation="relu",
+        padding="same",
+        kernel_regularizer=l2(l2_reg),
+        bias_regularizer=l2(l2_reg),
+    )(x)
+    x = BatchNormalization()(x)
+
+    mu_cage = Conv1D(
+        1,
+        1,
+        activation="exponential",
+        padding="same",
+        kernel_regularizer=l2(l2_reg),
+        bias_regularizer=l2(l2_reg),
+    )(x)
+    mu_cage = Reshape([3 * T])(mu_cage)
+
+    # Build model
+    model_gat = Model(inputs=[X_in, A_in], outputs=[mu_cage, att])
+    model_gat._name = "Seq-GraphReg"
+
+    return model_gat

@@ -12,9 +12,9 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import backend as K
 
 
-from data import dataset_iterator, read_tf_record_1shot
-from models import SeqCNN, GraphReg, poisson_loss
-from metrics import PearsonCorrelationMetric
+from data import dataset_iterator, read_tf_record_1shot, parse_proto
+from models import SeqCNN, GraphReg, poisson_loss, seq_graphreg, seq_cnn_base
+from metrics import PearsonCorrelation
 
 
 @tf.function
@@ -25,10 +25,10 @@ def train_step(model, optimizer, inputs, labels, loss_obj, metric_obj):
         # idx is range(400, 800)
         Y_hat_cage, _ = model([x_in_gat, adj], training=True)
         Y_hat_cage_idx = Y_hat_cage[
-            400:800
+            :, 400:800
         ]  # tf.gather(Y_hat_cage, idx, axis=1) # selects middle 400 CAGE values
         Y_cage_idx = Y_cage[
-            400:800
+            :, 400:800
         ]  # tf.gather(Y_cage, idx, axis=1) # selects middle 400 CAGE values
 
         # Monitor NaNs
@@ -36,51 +36,53 @@ def train_step(model, optimizer, inputs, labels, loss_obj, metric_obj):
             print("NaN detected in CAGE!")
 
         # Compute loss
-        train_loss = poisson_loss(Y_cage_idx, Y_hat_cage_idx)
+        eps = 1e-20
+        loss = poisson_loss(Y_cage_idx + eps, Y_hat_cage_idx + eps)
 
     # Backprop
-    gradients = tape.gradient(train_loss, model.trainable_variables)
+    gradients = tape.gradient(loss, model.trainable_variables)
     optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
     # Track loss and metric
-    loss_obj(train_loss)
-    metric_obj(Y_hat_cage, Y_cage)
+    loss_obj(loss)
+    metric_obj.update_state(tf.math.log1p(Y_hat_cage), tf.math.log1p(Y_cage))
 
 
 @tf.function
 def val_step(model, inputs, labels, loss_obj, metric_obj):
     Y_cage = labels
     x_in_gat, adj = inputs
-    Y_hat_cage, _ = model([x_in_gat, adj], training=True)
-    Y_hat_cage_idx = Y_hat_cage[400:800]  # tf.gather(Y_hat_cage, idx, axis=1)
-    Y_cage_idx = Y_cage[400:800]  # tf.gather(Y_cage, idx, axis=1)
+    Y_hat_cage, _ = model([x_in_gat, adj], training=False)
+    Y_hat_cage_idx = Y_hat_cage[:, 400:800]  # tf.gather(Y_hat_cage, idx, axis=1)
+    Y_cage_idx = Y_cage[:, 400:800]  # tf.gather(Y_cage, idx, axis=1)
 
     # Compute loss
-    val_loss = poisson_loss(Y_cage_idx, Y_hat_cage_idx)
+    eps = 1e-20
+    loss = poisson_loss(Y_cage_idx + eps, Y_hat_cage_idx + eps)
 
     # Track loss and metric
-    loss_obj(val_loss)
-    metric_obj(Y_hat_cage, Y_cage)
+    loss_obj(loss)
+    metric_obj.update_state(tf.math.log1p(Y_hat_cage), tf.math.log1p(Y_cage))
 
 
 @tf.function
 def test_step(model, inputs, labels, loss_obj, metric_obj):
     Y_cage = labels
     x_in_gat, adj = inputs
-    Y_hat_cage, _ = model([x_in_gat, adj], training=True)
-    Y_hat_cage_idx = Y_hat_cage[400:800]  # tf.gather(Y_hat_cage, idx, axis=1)
-    Y_cage_idx = Y_cage[400:800]  # tf.gather(Y_cage, idx, axis=1)
+    Y_hat_cage, _ = model([x_in_gat, adj], training=False)
+    Y_hat_cage_idx = Y_hat_cage[:, 400:800]  # tf.gather(Y_hat_cage, idx, axis=1)
+    Y_cage_idx = Y_cage[:, 400:800]  # tf.gather(Y_cage, idx, axis=1)
 
     # Compute loss
-    test_loss = poisson_loss(Y_cage_idx, Y_hat_cage_idx)
+    eps = 1e-20
+    loss = poisson_loss(Y_cage_idx + eps, Y_hat_cage_idx + eps)
 
     # Track loss and metric
-    loss_obj(test_loss)
-    metric_obj(Y_hat_cage, Y_cage)
+    loss_obj(loss)
+    metric_obj.update_state(tf.math.log1p(Y_hat_cage), tf.math.log1p(Y_cage))
 
 
 def main():
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     # tf.debugging.enable_check_numerics()
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=str, help="The config to use.")
@@ -113,6 +115,8 @@ def main():
 
     assert os.path.exists(os.path.join(config["data_dir"], args.cell_type))
     assert os.path.exists(os.path.join(config["save_dir"], args.cell_type))
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(config["device"])
 
     tf.keras.utils.set_random_seed(config["seed"])
     if args.deterministic:
@@ -147,15 +151,16 @@ def main():
     val_loss = tf.keras.metrics.Mean(name="val_loss")
     test_loss = tf.keras.metrics.Mean(name="test_loss")
 
-    train_pearson = PearsonCorrelationMetric(name="train_pearson")
-    val_pearson = PearsonCorrelationMetric(name="val_pearson")
-    test_pearson = PearsonCorrelationMetric(name="test_pearson")
+    train_pearson = PearsonCorrelation(name="train_pearson")
+    val_pearson = PearsonCorrelation(name="val_pearson")
+    test_pearson = PearsonCorrelation(name="test_pearson")
 
     # Parameters
     F = 4
 
     # Build models
     model_cnn_base = SeqCNN(dropout=config["dropout"], l2_reg=config["l2_reg"])
+    model_cnn_base(tf.zeros((1, 100000, 4), dtype=tf.float32))
     model_cnn_base.load_weights(config["seq_cnn_base_model"])
     model_cnn_base._name = "Seq-CNN_base"
     model_cnn_base.trainable = False
@@ -163,84 +168,101 @@ def main():
     model_gat = GraphReg(dropout=config["dropout"], l2_reg=config["l2_reg"])
     model_gat._name = "Seq-GraphReg"
 
+    train_filenames = [
+        os.path.join(config["data_dir"], args.cell_type, f"chr{i}.tfr")
+        for i in train_chr_list
+    ]
+    val_filenames = [
+        os.path.join(config["data_dir"], args.cell_type, f"chr{i}.tfr")
+        for i in valid_chr_list
+    ]
+    train_dataset = (
+        tf.data.TFRecordDataset(train_filenames, compression_type="ZLIB")
+        .map(parse_proto)
+        .batch(1)
+        .shuffle(buffer_size=50, reshuffle_each_iteration=True)
+    )
+    val_dataset = (
+        tf.data.TFRecordDataset(val_filenames, compression_type="ZLIB")
+        .map(parse_proto)
+        .batch(1)
+        .shuffle(buffer_size=50, reshuffle_each_iteration=True)
+    )
+
     for epoch in range(1, max_epochs + 1):
         train_loss.reset_state()
         val_loss.reset_state()
         test_loss.reset_state()
 
-        for i in train_chr_list:
-            file_name_train = os.path.join(
-                config["data_dir"], args.cell_type, f"chr{i}.tfr"
+        train_pearson.reset_state()
+        val_pearson.reset_state()
+        test_pearson.reset_state()
+
+        for i, item in enumerate(train_dataset):
+            data_exist, seq, Y, adj, Y_h3k4me3, Y_h3k27ac, Y_dnase, idx, tss_idx = (
+                read_tf_record_1shot(item)
             )
-            iterator_train = dataset_iterator(file_name_train, batch_size=1)
-            for item_idx, item in enumerate(iterator_train):
-                data_exist, seq, Y, adj, Y_h3k4me3, Y_h3k27ac, Y_dnase, idx, tss_idx = (
-                    read_tf_record_1shot(item)
-                )
-                print(
-                    f"train chr: {i}\t\texample: {item_idx}".ljust(80),
-                    end="\r",
-                    flush=True,
-                )
-
-                if data_exist:
-                    if tf.reduce_sum(tf.gather(tss_idx, tf.range(400, 800))) > 0:
-                        for jj in range(0, 60, 10):
-                            seq_batch = seq[jj : jj + 10]
-                            _, _, _, h = model_cnn_base(seq_batch)
-                            H.append(h)
-
-                        x_in_gat = K.concatenate(H, axis=0)
-                        x_in_gat = K.reshape(x_in_gat, [1, 60000, 64])
-
-                        inputs = (x_in_gat, adj)
-                        labels = Y
-                        train_step(
-                            model_gat,
-                            optimizer,
-                            inputs,
-                            labels,
-                            train_loss,
-                            train_pearson,
-                        )
-
-                else:
-                    break
-
-        for i in valid_chr_list:
-
-            file_name_val = os.path.join(
-                config["data_dir"], args.cell_type, f"chr{i}.tfr"
+            print(
+                f"train: \t\texample {i}".ljust(80),
+                end="\r",
+                flush=True,
             )
-            iterator_val = dataset_iterator(file_name_val, batch_size=1)
-            for item_idx, item in enumerate(iterator_val):
-                data_exist, seq, Y, adj, Y_h3k4me3, Y_h3k27ac, Y_dnase, idx, tss_idx = (
-                    read_tf_record_1shot(item)
-                )
-                print(
-                    f"valid chr: {i}\t\texample: {item_idx}".ljust(80),
-                    end="\r",
-                    flush=True,
-                )
-                H = []
-                if data_exist:
-                    if tf.reduce_sum(tf.gather(tss_idx, tf.range(400, 800))) > 0:
-                        for jj in range(0, 60, 10):
-                            seq_batch = seq[jj : jj + 10]
-                            _, _, _, h = model_cnn_base(seq_batch)
-                            H.append(h)
+            H = []
+            if data_exist:
+                if tf.reduce_sum(tf.gather(tss_idx, tf.range(400, 800))) > 0:
+                    for jj in range(0, 60, 10):
+                        seq_batch = seq[jj : jj + 10]
+                        _, _, _, h = model_cnn_base(seq_batch)
+                        H.append(h)
 
-                        x_in_gat = K.concatenate(H, axis=0)
-                        x_in_gat = K.reshape(x_in_gat, [1, 60000, 64])
+                    x_in_gat = K.concatenate(H, axis=0)
+                    x_in_gat = K.reshape(x_in_gat, [1, 60000, 64])
 
-                        inputs = (x_in_gat, adj)
-                        labels = Y
-                        val_step(model_gat, inputs, labels, val_loss, val_pearson)
+                    inputs = (x_in_gat, adj)
+                    labels = Y
+                    # Y_hat_cage, _ = model_gat([x_in_gat, adj])
+                    train_step(
+                        model_gat,
+                        optimizer,
+                        inputs,
+                        labels,
+                        train_loss,
+                        train_pearson,
+                    )
 
-                else:
-                    break
+            else:
+                break
+
+        for i, item in enumerate(val_dataset):
+            data_exist, seq, Y, adj, Y_h3k4me3, Y_h3k27ac, Y_dnase, idx, tss_idx = (
+                read_tf_record_1shot(item)
+            )
+            print(
+                f"validation: \t\texample {i}".ljust(80),
+                end="\r",
+                flush=True,
+            )
+            H = []
+            if data_exist:
+                if tf.reduce_sum(tf.gather(tss_idx, tf.range(400, 800))) > 0:
+                    for jj in range(0, 60, 10):
+                        seq_batch = seq[jj : jj + 10]
+                        _, _, _, h = model_cnn_base(seq_batch)
+                        H.append(h)
+
+                    x_in_gat = K.concatenate(H, axis=0)
+                    x_in_gat = K.reshape(x_in_gat, [1, 60000, 64])
+
+                    inputs = (x_in_gat, adj)
+                    labels = Y
+                    val_step(model_gat, inputs, labels, val_loss, val_pearson)
+
+            else:
+                break
         train_loss_epoch = train_loss.result()
         val_loss_epoch = val_loss.result()
+        train_pearson_epoch = train_pearson.result()
+        val_pearson_epoch = val_pearson.result()
 
         if val_loss_epoch < best_loss:
             early_stopping_counter = 1
@@ -249,14 +271,16 @@ def main():
                 os.path.join(
                     config["save_dir"],
                     args.cell_type,
-                    f"{config['name']}_{model_file_name}_validloss={val_loss_epoch:0.2f}",
+                    f"{config['name']}_{model_file_name}_validloss={val_loss_epoch:0.2f}.h5",
                 ),
-                save_format="h5",
             )
 
         else:
             early_stopping_counter += 1
-            if early_stopping_counter == max_early_stopping:
+            if (
+                config["early_stopping"]
+                and early_stopping_counter == max_early_stopping
+            ):
                 print(f"Stopping early on epoch {epoch}")
                 break
 
@@ -265,11 +289,20 @@ def main():
             + f"Epoch {epoch}\n"
             + f"Loss: {train_loss_epoch:0.2f}\n"
             + f"Validation Loss: {val_loss_epoch:0.2f}\n"
+            + f"Train Pearson: {train_pearson_epoch:0.2f}\n"
+            + f"Valid Pearson: {val_pearson_epoch:0.2f}\n"
             + "################################\n"
         )
 
         if not args.no_wandb:
-            wandb.log({"train_loss": train_loss_epoch, "val_loss": val_loss_epoch})
+            wandb.log(
+                {
+                    "train_loss": train_loss_epoch,
+                    "val_loss": val_loss_epoch,
+                    "train_pearson": train_pearson_epoch,
+                    "val_pearson": val_pearson_epoch,
+                }
+            )
 
     if not args.no_wandb:
         wandb.finish()
